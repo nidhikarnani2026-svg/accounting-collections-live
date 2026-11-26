@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="en-IN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Accounting and Collections</title>
+<style>
+  :root {
+    --color-fg: #1b2221; --color-fg-muted: #5d6a67; --color-bg: #f3f5f4; --color-panel: #ffffff; --color-border-line: #d8dedc;
+    --color-ok: #0f6f6a; --color-warn: #9a4a16; --color-bad: #b3261e;
+    --font-anthropic-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --cds-font-size-caption: 12px; --cds-font-size-body: 15px; --cds-font-size-heading: 18px; --cds-font-size-title: 28px;
+    --cds-gap-xs: 4px; --cds-gap-sm: 8px; --cds-gap-md: 14px; --cds-gap-lg: 22px; --cds-gap-xl: 32px;
+    --cds-pad-xs: 4px; --cds-pad-sm: 8px; --cds-pad-md: 14px; --cds-pad-lg: 20px; --cds-pad-xl: 32px;
+    --cds-radius: 12px;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --color-fg: #e8eeec; --color-fg-muted: #9aa8a4; --color-bg: #121615; --color-panel: #1b2120; --color-border-line: #2f3937; --color-ok: #5cc7bf; --color-warn: #f0a36b; --color-bad: #ff8a80; color-scheme: dark; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--color-bg); color: var(--color-fg); font-family: var(--font-anthropic-sans); font-size: var(--cds-font-size-body); line-height: 1.45; }
+  #dash-root { max-width: 1240px; margin: 0 auto; padding: 20px max(16px, env(safe-area-inset-right, 0px)) 48px max(16px, env(safe-area-inset-left, 0px)); }
+  .dash-skeleton { color: transparent !important; background: color-mix(in srgb, var(--color-fg) 9%, transparent); border-radius: 6px; }
+  .live-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-bottom: 14px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; color: var(--color-fg-muted); }
+  .live-bar-status { flex: 1 1 auto; min-width: 0; }
+  .live-bad { color: var(--color-bad); }
+  .live-btn { font: inherit; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--color-border-line); background: var(--color-panel); color: var(--color-fg); cursor: pointer; }
+  .live-btn:hover { border-color: var(--color-fg-muted); }
+  .live-btn:focus-visible, .live-input:focus-visible { outline: 2px solid var(--color-ok); outline-offset: 2px; }
+  .live-login { max-width: 380px; margin: 12vh auto 0; padding: 28px; background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); display: flex; flex-direction: column; gap: 14px; }
+  .live-login h1 { margin: 0; font-size: 22px; }
+  .live-login p { margin: 0; color: var(--color-fg-muted); font-size: 14px; }
+  .live-field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--color-fg-muted); }
+  .live-input { font: inherit; font-size: 15px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--color-border-line); background: var(--color-bg); color: var(--color-fg); }
+  .live-submit { font: inherit; font-weight: 600; padding: 11px 14px; border-radius: 8px; border: 0; background: var(--color-ok); color: var(--color-panel); cursor: pointer; }
+  .live-submit[disabled] { opacity: .6; cursor: default; }
+</style>
+</head>
+<body>
+<div id="dash-root">
+
+<form class="live-login" id="login" hidden>
+  <h1>Accounting and Collections</h1>
+  <p>Sign in with your Tally data login to see the dashboard.</p>
+  <label class="live-field" for="login-email">Email<input class="live-input" id="login-email" type="email" autocomplete="username" required></label>
+  <label class="live-field" for="login-password">Password<input class="live-input" id="login-password" type="password" autocomplete="current-password" required></label>
+  <button class="live-submit" id="login-submit" type="submit">Sign in</button>
+  <p class="live-bad" id="login-error" role="alert" hidden></p>
+</form>
+
+<div id="app" hidden>
+<div class="live-bar">
+  <span class="live-bar-status" id="live-status" role="status">Loading from Tally…</span>
+  <button class="live-btn" id="live-refresh" type="button">Refresh</button>
+  <button class="live-btn" id="live-signout" type="button">Sign out</button>
+</div>
+
+<script>
+  // Live runtime: signs in to Supabase, runs the dashboard's read-only queries, and feeds the page below.
+  (function () {
+    const SUPABASE_URL = "https://pvixwpksfniwwwktrygw.supabase.co";
+    const PUBLIC_KEY = "sb_publishable_7sObIkBbeGgJOn7f7LXMbQ_HlIU1cji";
+    const QUERIES = {
+      "ageing": "WITH t AS (SELECT (now() AT TIME ZONE 'Asia/Kolkata')::date AS today), bt AS (SELECT ledger, mode() WITHIN GROUP (ORDER BY split_part(credit_period,' ',1)::int) AS days FROM tally_x_bill_lines WHERE credit_period ~ '^[0-9]+ Days$' GROUP BY 1), deb AS (SELECT l.name, -l.closing_balance AS closing, coalesce(l.credit_period_days, bt.days) AS known_terms, coalesce(l.credit_period_days, bt.days, 30) AS terms FROM tally_ledgers_v l LEFT JOIN bt ON bt.ledger = l.name WHERE l.is_deleted IS NOT TRUE AND 'Sundry Debtors' = ANY(l.group_path) AND -l.closing_balance > 1), d AS (SELECT e.ledger, e.date, -e.amount AS amt, sum(-e.amount) OVER (PARTITION BY e.ledger ORDER BY e.date DESC, e.voucher_guid, e.line_no) AS cum FROM tally_x_entries e JOIN deb ON deb.name = e.ledger WHERE e.amount < 0), dt AS (SELECT ledger, sum(amt) AS debits FROM d GROUP BY 1), p AS (SELECT d.ledger, d.date AS dt, greatest(least(d.amt, deb.closing - (d.cum - d.amt)), 0) AS open FROM d JOIN deb ON deb.name = d.ledger UNION ALL SELECT deb.name, DATE '2026-03-31', deb.closing - coalesce(dt.debits, 0) FROM deb LEFT JOIN dt ON dt.ledger = deb.name WHERE deb.closing - coalesce(dt.debits, 0) > 1), q AS (SELECT p.ledger, p.open, t.today - p.dt AS age, p.dt + deb.terms AS due, t.today FROM p JOIN deb ON deb.name = p.ledger CROSS JOIN t WHERE p.open > 0.5), pp AS (SELECT ledger, max(today) AS today, max(age) AS oldest_days, sum(CASE WHEN age > 60 THEN open ELSE 0 END) AS over60, sum(CASE WHEN due < today THEN open ELSE 0 END) AS overdue, max(CASE WHEN due < today THEN today - due ELSE 0 END) AS days_late, sum(CASE WHEN due = today THEN open ELSE 0 END) AS due_today, sum(CASE WHEN due BETWEEN today + 1 AND today + 30 THEN open ELSE 0 END) AS due_next30, sum(CASE WHEN due BETWEEN today + 1 AND today + 7 THEN open ELSE 0 END) AS w1, sum(CASE WHEN due BETWEEN today + 8 AND today + 14 THEN open ELSE 0 END) AS w2, sum(CASE WHEN due BETWEEN today + 15 AND today + 21 THEN open ELSE 0 END) AS w3, sum(CASE WHEN due BETWEEN today + 22 AND today + 28 THEN open ELSE 0 END) AS w4 FROM q GROUP BY 1), pf AS (SELECT v.party, count(*) AS n, sum(abs(coalesce((SELECT sum(bl.amount) FROM tally_x_bill_lines bl WHERE bl.voucher_guid = v.guid), 0))) AS amt FROM tally_full_vouchers v WHERE v.voucher_type ILIKE 'Proforma%' AND v.is_cancelled IS NOT TRUE GROUP BY 1) SELECT pp.ledger AS party, to_char(pp.today, 'YYYY-MM-DD') AS today, round(deb.closing::numeric, 0) AS owes, deb.known_terms AS terms_in_tally, deb.terms AS terms_used, pp.oldest_days, round(pp.over60::numeric, 0) AS over60, round(pp.overdue::numeric, 0) AS overdue, pp.days_late, CASE WHEN pp.days_late <= 0 THEN 'A' WHEN pp.days_late <= 30 THEN 'B' WHEN pp.days_late <= 90 THEN 'C' ELSE 'D' END AS grade, round(pp.due_today::numeric, 0) AS due_today, round(pp.due_next30::numeric, 0) AS due_next30, round(pp.w1::numeric, 0) AS w1, round(pp.w2::numeric, 0) AS w2, round(pp.w3::numeric, 0) AS w3, round(pp.w4::numeric, 0) AS w4, coalesce(pf.n, 0) AS proformas, round(coalesce(pf.amt, 0)::numeric, 0) AS proforma_value FROM pp JOIN deb ON deb.name = pp.ledger LEFT JOIN pf ON pf.party = pp.ledger ORDER BY deb.closing DESC",
+      "receipts": "WITH t AS (SELECT (now() AT TIME ZONE 'Asia/Kolkata')::date AS today) SELECT to_char(r.date, 'YYYY-MM-DD') AS date, r.party_ledger AS party, count(*) AS receipts, round(sum(abs(r.amount))::numeric, 0) AS amount, max(CASE WHEN r.date = t.today THEN 1 ELSE 0 END) AS is_today FROM tally_vouchers_v r CROSS JOIN t WHERE r.voucher_type = 'Receipt' AND r.is_cancelled IS NOT TRUE AND r.date BETWEEN t.today - 1 AND t.today GROUP BY 1, 2 ORDER BY 1 DESC, 4 DESC",
+      "receipt_checks": "WITH t AS (SELECT (now() AT TIME ZONE 'Asia/Kolkata')::date AS today), rc AS (SELECT bl.date, bl.ledger, bl.bill_name, sum(bl.amount) AS paid FROM tally_x_bill_lines bl CROSS JOIN t WHERE bl.voucher_type = 'Receipt' AND bl.bill_type = 'Agst Ref' AND bl.date BETWEEN t.today - 6 AND t.today GROUP BY 1, 2, 3), z AS (SELECT ledger_name AS ledger, bill_name, amount, 'New Ref' AS bill_type FROM tally_ledger_opening_bills UNION ALL SELECT ledger, bill_name, amount, bill_type FROM tally_x_bill_lines WHERE voucher_type NOT ILIKE 'Proforma%'), tot AS (SELECT ledger, bill_name, -sum(amount) AS bal, -sum(CASE WHEN bill_type = 'New Ref' THEN amount ELSE 0 END) AS billed FROM z GROUP BY 1, 2), last AS (SELECT ledger, bill_name, max(date) AS date FROM rc GROUP BY 1, 2) SELECT to_char(rc.date, 'YYYY-MM-DD') AS date, rc.ledger AS party, rc.bill_name AS invoice, round(tot.billed::numeric, 0) AS invoice_value, round(rc.paid::numeric, 0) AS received, round(tot.bal::numeric, 0) AS still_open, CASE WHEN rc.date = (SELECT today FROM t) THEN 1 ELSE 0 END AS is_today FROM rc JOIN last ON last.ledger = rc.ledger AND last.bill_name = rc.bill_name AND last.date = rc.date JOIN tot ON tot.ledger = rc.ledger AND tot.bill_name = rc.bill_name WHERE tot.bal > 1 AND tot.billed > 0 ORDER BY rc.date DESC, tot.bal DESC",
+      "week": "WITH t AS (SELECT (now() AT TIME ZONE 'Asia/Kolkata')::date AS today), w AS (SELECT today - (CASE WHEN (extract(dow FROM today)::int + 4) % 7 = 0 THEN 7 ELSE (extract(dow FROM today)::int + 4) % 7 END) AS week_end FROM t) SELECT to_char(w.week_end - 6, 'YYYY-MM-DD') AS week_start, to_char(w.week_end, 'YYYY-MM-DD') AS week_end, count(r.guid) AS receipts, count(DISTINCT r.party_ledger) AS parties, round(coalesce(sum(abs(r.amount)), 0)::numeric, 0) AS collected FROM w LEFT JOIN tally_vouchers_v r ON r.voucher_type = 'Receipt' AND r.is_cancelled IS NOT TRUE AND r.date BETWEEN w.week_end - 6 AND w.week_end GROUP BY w.week_end",
+      "cash_out": "WITH wl AS (SELECT date_trunc('month', e.date)::date AS m, -sum(e.amount) AS amt FROM tally_x_entries e WHERE e.ledger IN ('Basic Wages','Basic Salary','Other Allowances','Over Time - Other Allowances','Over Time - Basic Salary','Employer EPS @ 8.33 %','Employer ESI Contribution','Employer EPF @ 3.67 %') GROUP BY 1), lw AS (SELECT m, amt FROM wl ORDER BY m DESC LIMIT 1), s AS (SELECT sum(closing_balance) AS amt, count(*) AS n FROM tally_ledgers_v WHERE is_deleted IS NOT TRUE AND 'Sundry Creditors' = ANY(group_path) AND closing_balance > 1), g AS (SELECT sum(CASE WHEN name NOT ILIKE 'TDS%' AND name NOT ILIKE 'TCS%' THEN closing_balance ELSE 0 END) AS gst, sum(CASE WHEN name ILIKE 'TDS%' THEN closing_balance ELSE 0 END) AS tds FROM tally_ledgers_v WHERE is_deleted IS NOT TRUE AND 'Duties & Taxes' = ANY(group_path)) SELECT round(s.amt::numeric, 0) AS suppliers, s.n AS supplier_count, round(lw.amt::numeric, 0) AS wages, to_char(lw.m, 'YYYY-MM') AS wages_month, round(greatest(g.gst, 0)::numeric, 0) AS gst, round(greatest(g.tds, 0)::numeric, 0) AS tds, round((s.amt + lw.amt + greatest(g.gst, 0) + greatest(g.tds, 0))::numeric, 0) AS cash_out FROM s CROSS JOIN lw CROSS JOIN g",
+      "months": "WITH t AS (SELECT (now() AT TIME ZONE 'Asia/Kolkata')::date AS today), mm AS (SELECT (date_trunc('month', today) - interval '1 month')::date AS m FROM t UNION ALL SELECT (date_trunc('month', today) - interval '2 month')::date FROM t), led AS (SELECT date_trunc('month', e.date)::date AS m, sum(CASE WHEN l.primary_group = 'Sales Accounts' THEN e.amount ELSE 0 END) AS sales, -sum(CASE WHEN e.ledger IN ('Basic Wages','Basic Salary','Other Allowances','Over Time - Other Allowances','Over Time - Basic Salary','Employer EPS @ 8.33 %','Employer ESI Contribution','Employer EPF @ 3.67 %','Puja Bonus') THEN e.amount ELSE 0 END) AS wages, -sum(CASE WHEN e.ledger ILIKE '%electric%' OR e.ledger = 'Factory Maintenance' OR e.ledger = 'Rent Charges' THEN e.amount ELSE 0 END) AS power_factory, -sum(CASE WHEN e.ledger ILIKE '%freight%' OR e.ledger ILIKE '%transport%' OR e.ledger ILIKE '%courier%' OR e.ledger ILIKE 'LOADING%' THEN e.amount ELSE 0 END) AS freight, -sum(CASE WHEN e.ledger ILIKE 'Advertisement%' OR e.ledger ILIKE 'AMAZON CA%' THEN e.amount ELSE 0 END) AS marketing FROM tally_x_entries e JOIN tally_ledgers_v l ON l.name = e.ledger GROUP BY 1), mat AS (SELECT date_trunc('month', date)::date AS m, sum(amount) AS material FROM tally_x_item_lines WHERE voucher_type = 'SJ-MATERIALS ISSUED' AND kind = 'consumed' AND is_cancelled IS NOT TRUE AND is_optional IS NOT TRUE GROUP BY 1) SELECT to_char(mm.m, 'YYYY-MM') AS month, round(coalesce(led.sales, 0)::numeric, 0) AS sales, round(coalesce(mat.material, 0)::numeric, 0) AS material, round(coalesce(led.wages, 0)::numeric, 0) AS wages, round(coalesce(led.power_factory, 0)::numeric, 0) AS power_factory, round(coalesce(led.freight, 0)::numeric, 0) AS freight, round(coalesce(led.marketing, 0)::numeric, 0) AS marketing FROM mm LEFT JOIN led ON led.m = mm.m LEFT JOIN mat ON mat.m = mm.m ORDER BY mm.m DESC",
+      "debtors": "WITH t AS (SELECT (now() AT TIME ZONE 'Asia/Kolkata')::date AS today), o AS (SELECT sum(-closing_balance) AS outstanding, count(*) AS parties FROM tally_ledgers_v WHERE is_deleted IS NOT TRUE AND 'Sundry Debtors' = ANY(group_path) AND -closing_balance > 1), i AS (SELECT -sum(bl.amount) AS invoiced FROM tally_x_bill_lines bl CROSS JOIN t WHERE bl.voucher_type = 'Sales' AND bl.bill_type = 'New Ref' AND bl.date BETWEEN t.today - 89 AND t.today) SELECT round(o.outstanding::numeric, 0) AS outstanding, o.parties, round(i.invoiced::numeric, 0) AS invoiced_90_days, round((o.outstanding / (i.invoiced / 90))::numeric, 0) AS debtor_days FROM o CROSS JOIN i"
+};
+    const REFRESH_MINUTES = 10;
+    const STORE = 'accounting-dashboard-session';
+
+    const datasets = {}, states = {}, calcs = {}, draws = [], watchers = [];
+    let cache = {}, session = null, timer = null, loadingNow = false;
+    Object.keys(QUERIES).forEach((id) => { states[id] = 'loading'; });
+
+    const dash = {
+      colors: ['var(--color-ok)', 'var(--color-warn)'],
+      loader() {}, setParams() {}, resetParams() {},
+      params() { return {}; },
+      refresh() { load(); },
+      calc(id, def) { calcs[id] = def; },
+      data(id) {
+        if (id in QUERIES) return {status: states[id], data: states[id] === 'ok' ? datasets[id] : []};
+        if (calcs[id]) {
+          const inputs = calcs[id].inputs.map((i) => dash.data(i));
+          const worst = inputs.find((d) => d.status !== 'ok');
+          if (worst) return {status: worst.status, data: null};
+          if (!(id in cache)) cache[id] = calcs[id].fn(...inputs.map((d) => d.data));
+          return {status: 'ok', data: cache[id]};
+        }
+        return {status: 'missing', data: null};
+      },
+      draw(name, fn) { if (fn) draws.push([name, fn]); else run(name); },
+      onData(fn) { watchers.push(fn); },
+      setLink(name) { try { history.replaceState(null, '', '#' + name); } catch (e) {} },
+    };
+    function run(only) {
+      watchers.forEach((fn) => fn());
+      draws.forEach(([name, fn]) => {
+        if (only && only !== name) return;
+        document.querySelectorAll('[data-draw="' + name + '"]').forEach((el) => fn(el));
+      });
+    }
+
+    const part = (date, opts) => new Intl.DateTimeFormat('en-GB', Object.assign({timeZone: 'UTC'}, opts)).format(date);
+    window.d3 = {
+      utcFormat: (spec) => (date) => spec
+        .replace('%A', part(date, {weekday: 'long'}))
+        .replace('%B', part(date, {month: 'long'}))
+        .replace('%b', part(date, {month: 'short'}))
+        .replace('%-d', String(date.getUTCDate()))
+        .replace('%Y', String(date.getUTCFullYear())),
+    };
+    window.dash = dash;
+
+    const el = (id) => document.getElementById(id);
+    const saveSession = (s) => { session = s; try { s ? localStorage.setItem(STORE, JSON.stringify(s)) : localStorage.removeItem(STORE); } catch (e) {} };
+    const readSession = () => { try { return JSON.parse(localStorage.getItem(STORE) || 'null'); } catch (e) { return null; } };
+
+    async function auth(grant, body) {
+      const res = await fetch(SUPABASE_URL + '/auth/v1/token?grant_type=' + grant, {
+        method: 'POST', headers: {'apikey': PUBLIC_KEY, 'Content-Type': 'application/json'}, body: JSON.stringify(body),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.access_token) throw new Error(json.error_description || json.msg || json.message || 'Sign-in failed.');
+      return {access_token: json.access_token, refresh_token: json.refresh_token, expires_at: Date.now() + (Number(json.expires_in) || 3600) * 1000};
+    }
+    async function freshToken() {
+      if (!session) throw new Error('Please sign in again.');
+      if (Date.now() > session.expires_at - 60000) saveSession(await auth('refresh_token', {refresh_token: session.refresh_token}));
+      return session.access_token;
+    }
+    async function ask(sql) {
+      const token = await freshToken();
+      const res = await fetch(SUPABASE_URL + '/rest/v1/rpc/ask_query', {
+        method: 'POST', headers: {'apikey': PUBLIC_KEY, 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}, body: JSON.stringify({sql}),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.status === 401) throw new Error('Please sign in again.');
+      if (!res.ok) throw new Error(json.message || 'Tally did not answer (' + res.status + ').');
+      if (!json.ok) throw new Error(json.error || 'The query failed.');
+      return json;
+    }
+
+    function showLogin(message) {
+      clearInterval(timer);
+      el('app').hidden = true;
+      el('login').hidden = false;
+      el('login-error').hidden = !message;
+      el('login-error').textContent = message || '';
+    }
+    function setStatus(text, bad) {
+      el('live-status').textContent = text;
+      el('live-status').classList.toggle('live-bad', !!bad);
+    }
+
+    async function load() {
+      if (loadingNow) return;
+      loadingNow = true;
+      setStatus('Loading from Tally…');
+      let asOf = null, minutes = null, failed = 0, signIn = null;
+      await Promise.all(Object.keys(QUERIES).map(async (id) => {
+        try {
+          const answer = await ask(QUERIES[id]);
+          datasets[id] = Array.isArray(answer.rows) ? answer.rows : [];
+          states[id] = 'ok';
+          if (answer.data_as_of) { asOf = answer.data_as_of; minutes = answer.minutes_ago; }
+        } catch (e) {
+          if (/sign in again|no access|switched off|super-admin/i.test(e.message)) signIn = e.message;
+          if (states[id] !== 'ok') states[id] = 'error';
+          failed += 1;
+          console.error(id, e.message);
+        }
+      }));
+      loadingNow = false;
+      if (signIn) { saveSession(null); showLogin(signIn); return; }
+      cache = {};
+      run();
+      const checked = new Date().toLocaleTimeString('en-IN', {hour: '2-digit', minute: '2-digit'});
+      if (failed) setStatus(failed + ' of ' + Object.keys(QUERIES).length + ' parts did not load. Press Refresh to try again.', true);
+      else setStatus('Tally synced ' + (asOf || 'time unknown') + (minutes != null ? ' (' + minutes + ' min ago)' : '') + ' · checked ' + checked + ' · rechecks every ' + REFRESH_MINUTES + ' minutes');
+    }
+
+    function start() {
+      el('login').hidden = true;
+      el('app').hidden = false;
+      load();
+      clearInterval(timer);
+      timer = setInterval(() => { if (!document.hidden) load(); }, REFRESH_MINUTES * 60000);
+    }
+
+    window.__liveBoot = function () {
+      el('login').addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const button = el('login-submit');
+        button.disabled = true;
+        el('login-error').hidden = true;
+        try {
+          saveSession(await auth('password', {email: el('login-email').value.trim(), password: el('login-password').value}));
+          el('login-password').value = '';
+          start();
+        } catch (e) {
+          el('login-error').textContent = e.message;
+          el('login-error').hidden = false;
+        }
+        button.disabled = false;
+      });
+      el('live-refresh').addEventListener('click', () => load());
+      el('live-signout').addEventListener('click', async () => {
+        const token = session && session.access_token;
+        saveSession(null);
+        if (token) fetch(SUPABASE_URL + '/auth/v1/logout', {method: 'POST', headers: {'apikey': PUBLIC_KEY, 'Authorization': 'Bearer ' + token}}).catch(() => {});
+        showLogin('');
+      });
+      document.addEventListener('visibilitychange', () => { if (!document.hidden && session && !el('app').hidden) load(); });
+      run();
+      session = readSession();
+      if (session && session.refresh_token) start(); else showLogin('');
+    };
+  })();
+</script>
+<style>
+  .ac { --ac-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; position: relative; display: flex; flex-direction: column; gap: var(--cds-gap-lg); font-family: var(--font-anthropic-sans); color: var(--color-fg); }
+  .ac [hidden] { display: none; }
+  .ac-tabs { display: inline-flex; align-self: flex-end; gap: 2px; padding: 4px; border-radius: 10px; background: color-mix(in srgb, var(--color-fg) 8%, var(--color-bg)); }
+  .ac-tab { border: 0; background: transparent; font: inherit; font-size: var(--cds-font-size-body); padding: 8px 18px; border-radius: 8px; color: var(--color-fg-muted); cursor: pointer; }
+  .ac-tab:hover { color: var(--color-fg); }
+  .ac-tab-on { background: var(--color-panel); color: var(--color-fg); font-weight: 600; box-shadow: 0 1px 2px rgb(0 0 0 / .14); }
+  .ac-tab:focus-visible { outline: 2px solid var(--color-fg); outline-offset: 2px; }
+  .ac-view { display: flex; flex-direction: column; gap: var(--cds-gap-lg); }
+  .ac-eyebrow { margin: 0; font-family: var(--ac-mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--color-fg-muted); }
+  .ac-headline { margin: 6px 0; font-size: clamp(22px, 3.2vw, 34px); line-height: 1.15; font-weight: 600; text-wrap: balance; }
+  .ac-src { margin: 0; font-family: var(--ac-mono); font-size: 12px; color: var(--color-fg-muted); }
+  .ac-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: var(--cds-gap-md); }
+  .ac-tile { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: var(--cds-pad-lg); background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); }
+  .ac-tile-label { font-family: var(--ac-mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--color-fg-muted); }
+  .ac-tile-num { font-family: var(--ac-mono); font-size: 24px; line-height: 1.2; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .ac-tile-sub { font-size: 13px; color: var(--color-fg-muted); }
+  .ac-tile-warn { background: color-mix(in srgb, var(--color-warn) 10%, var(--color-panel)); border-color: color-mix(in srgb, var(--color-warn) 40%, var(--color-border-line)); }
+  .ac-tile-warn .ac-tile-label, .ac-tile-warn .ac-tile-num { color: var(--color-warn); }
+  .ac-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: var(--cds-gap-md); align-items: start; }
+  .ac-panel { min-width: 0; padding: var(--cds-pad-lg); background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); }
+  .ac-panel-title { margin: 0; font-size: 18px; font-weight: 600; }
+  .ac-panel-sub { margin: 2px 0 10px; font-size: 13px; color: var(--color-fg-muted); }
+  .ac-list { display: flex; flex-direction: column; min-height: 120px; }
+  .ac-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--color-border-line); }
+  .ac-row-main { min-width: 0; }
+  .ac-row-title { font-weight: 600; overflow-wrap: anywhere; }
+  .ac-row-sub { font-size: 13px; color: var(--color-fg-muted); }
+  .ac-row-val { font-family: var(--ac-mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .ac-val-warn { color: var(--color-warn); }
+  .ac-val-ok { color: var(--color-ok); }
+  .ac-pill { margin-left: 8px; padding: 1px 8px; border: 1px solid currentColor; border-radius: 999px; font-family: var(--ac-mono); font-size: 11px; font-weight: 400; color: var(--color-warn); }
+  .ac-empty { padding: 12px 0; border-top: 1px solid var(--color-border-line); color: var(--color-fg-muted); }
+  .ac-points { padding: var(--cds-pad-lg); background: color-mix(in srgb, var(--color-ok) 8%, var(--color-panel)); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); }
+  .ac-points-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .ac-points-note { font-family: var(--ac-mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--color-fg-muted); }
+  .ac-points-list { margin: 12px 0 0; padding-left: 1.4em; display: flex; flex-direction: column; gap: 8px; }
+  .ac-foot { margin: 0; font-family: var(--ac-mono); font-size: 12px; line-height: 1.6; color: var(--color-fg-muted); }
+  .ac-foot a { color: inherit; }
+  @media (min-width: 900px) {
+    .ac-tabs { position: absolute; right: 0; top: 30px; }
+    .ac-head { padding-right: 320px; }
+  }
+  @media print {
+    .ac-tabs { display: none; }
+    .ac-view + .ac-view { break-before: page; }
+  }
+</style>
+
+<div class="ac">
+  <div class="ac-tabs" role="tablist" aria-label="Review period">
+    <button class="ac-tab ac-tab-on" id="tab-daily" type="button" role="tab" aria-selected="true" data-view="daily">Daily</button>
+    <button class="ac-tab" id="tab-weekly" type="button" role="tab" aria-selected="false" data-view="weekly">Weekly</button>
+    <button class="ac-tab" id="tab-monthly" type="button" role="tab" aria-selected="false" data-view="monthly">Monthly</button>
+  </div>
+
+  <section class="ac-view" id="daily" data-view="daily">
+    <div class="ac-head">
+      <p class="ac-eyebrow">Accounting and collections · <span class="dash-skeleton" data-draw="v" data-source="ageing" data-field="today" data-row="0" data-fmt="day">—</span></p>
+      <h1 class="ac-headline" id="daily-headline"><span class="dash-skeleton" data-draw="v" data-source="daily_summary" data-field="collected" data-row="0" data-fmt="inr">—</span> came in today. <span class="dash-skeleton" data-draw="v" data-source="daily_summary" data-field="flag_parties" data-row="0" data-fmt="num">—</span> parties with overdue money have new proformas.</h1>
+      <p class="ac-src">Live from Tally · assumed rules are listed at the foot</p>
+    </div>
+
+    <div class="ac-tiles">
+      <div class="ac-tile" id="tile-cash-collected">
+        <span class="ac-tile-label">Cash collected</span>
+        <span class="ac-tile-num dash-skeleton" data-draw="v" data-source="daily_summary" data-field="collected" data-row="0" data-fmt="inr">—</span>
+        <span class="ac-tile-sub"><span class="dash-skeleton" data-draw="v" data-source="daily_summary" data-field="receipts" data-row="0" data-fmt="num">—</span> receipts from <span class="dash-skeleton" data-draw="v" data-source="daily_summary" data-field="parties" data-row="0" data-fmt="num">—</span> parties</span>
+      </div>
+      <div class="ac-tile" id="tile-due-today">
+        <span class="ac-tile-label">Due today</span>
+        <span class="ac-tile-num dash-skeleton" data-draw="v" data-source="daily_summary" data-field="due_today" data-row="0" data-fmt="inr">—</span>
+        <span class="ac-tile-sub"><span class="dash-skeleton" data-draw="v" data-source="daily_summary" data-field="due_parties" data-row="0" data-fmt="num">—</span> parties</span>
+      </div>
+      <div class="ac-tile" id="tile-reminders">
+        <span class="ac-tile-label">Reminders sent</span>
+        <span class="ac-tile-num">—</span>
+        <span class="ac-tile-sub">Mail log is not connected</span>
+      </div>
+      <div class="ac-tile ac-tile-warn" id="tile-receipts-to-check">
+        <span class="ac-tile-label">Receipts to check</span>
+        <span class="ac-tile-num dash-skeleton" data-draw="v" data-source="daily_summary" data-field="checks" data-row="0" data-fmt="num">—</span>
+        <span class="ac-tile-sub">Today's receipts that left <span class="dash-skeleton" data-draw="v" data-source="daily_summary" data-field="checks_open" data-row="0" data-fmt="inr">—</span> unpaid on their invoices</span>
+      </div>
+      <div class="ac-tile ac-tile-warn" id="tile-red-flags">
+        <span class="ac-tile-label">Red-flag orders</span>
+        <span class="ac-tile-num dash-skeleton" data-draw="v" data-source="daily_summary" data-field="flag_parties" data-row="0" data-fmt="num">—</span>
+        <span class="ac-tile-sub"><span class="dash-skeleton" data-draw="v" data-source="daily_summary" data-field="flag_proformas" data-row="0" data-fmt="num">—</span> new proformas from parties with overdue money</span>
+      </div>
+    </div>
+
+    <div class="ac-panels">
+      <div class="ac-panel" id="panel-red-flags">
+        <h2 class="ac-panel-title">Red flag: new proformas from parties with dues</h2>
+        <p class="ac-panel-sub">Largest overdue first · decide before dispatch</p>
+        <div class="ac-list dash-skeleton" data-draw="red-flags" data-source="red_flags"></div>
+      </div>
+      <div class="ac-panel" id="panel-receipts-to-check">
+        <h2 class="ac-panel-title">Receipts to check</h2>
+        <p class="ac-panel-sub">Last 7 days · receipts that left part of an invoice unpaid</p>
+        <div class="ac-list dash-skeleton" data-draw="receipt-checks" data-source="receipt_checks"></div>
+      </div>
+    </div>
+
+    <div class="ac-points" id="daily-points">
+      <div class="ac-points-head">
+        <h2 class="ac-panel-title">Talking points for this review</h2>
+        <span class="ac-points-note">Filled from the numbers above</span>
+      </div>
+      <ol class="ac-points-list">
+        <li class="ac-if-flags"><span class="dash-skeleton" data-draw="v" data-source="red_flags" data-field="party" data-row="0" data-fmt="text">—</span> has <span class="dash-skeleton" data-draw="v" data-source="red_flags" data-field="overdue" data-row="0" data-fmt="inr">—</span> overdue, up to <span class="dash-skeleton" data-draw="v" data-source="red_flags" data-field="days_late" data-row="0" data-fmt="num">—</span> days late, and has new proformas worth <span class="dash-skeleton" data-draw="v" data-source="red_flags" data-field="proforma_value" data-row="0" data-fmt="inr">—</span>. Decide before dispatch.</li>
+        <li class="ac-if-noflags" hidden>No party with overdue money has a new proforma.</li>
+        <li class="ac-if-checks"><span class="dash-skeleton" data-draw="v" data-source="receipt_checks" data-field="party" data-row="0" data-fmt="text">—</span> paid <span class="dash-skeleton" data-draw="v" data-source="receipt_checks" data-field="received" data-row="0" data-fmt="inr">—</span> against an invoice of <span class="dash-skeleton" data-draw="v" data-source="receipt_checks" data-field="invoice_value" data-row="0" data-fmt="inr">—</span>, leaving <span class="dash-skeleton" data-draw="v" data-source="receipt_checks" data-field="still_open" data-row="0" data-fmt="inr">—</span>. Check whether it is a part payment or a deduction.</li>
+        <li class="ac-if-nochecks" hidden>Every receipt in the last 7 days cleared its invoice in full.</li>
+        <li>Reminder and thank-you mails are not connected, so those counts stay blank.</li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="ac-view" id="weekly" data-view="weekly" hidden>
+    <div class="ac-head">
+      <p class="ac-eyebrow">Accounting and collections · <span class="dash-skeleton" data-draw="v" data-source="week" data-field="week_start" data-row="0" data-fmt="short">—</span> to <span class="dash-skeleton" data-draw="v" data-source="week" data-field="week_end" data-row="0" data-fmt="short">—</span></p>
+      <h1 class="ac-headline" id="weekly-headline"><span class="dash-skeleton" data-draw="v" data-source="weekly_summary" data-field="collected" data-row="0" data-fmt="inr">—</span> collected. <span class="dash-skeleton" data-draw="v" data-source="weekly_summary" data-field="over60" data-row="0" data-fmt="inr">—</span> is more than 60 days old.</h1>
+      <p class="ac-src">Live from Tally · last full week, Thursday to Wednesday</p>
+    </div>
+
+    <div class="ac-tiles">
+      <div class="ac-tile" id="tile-collected">
+        <span class="ac-tile-label">Collected</span>
+        <span class="ac-tile-num dash-skeleton" data-draw="v" data-source="weekly_summary" data-field="collected" data-row="0" data-fmt="inr">—</span>
+        <span class="ac-tile-sub"><span class="dash-skeleton" data-draw="v" data-source="weekly_summary" data-field="receipts" data-row="0" data-fmt="num">—</span> receipts</span>
+      </div>
+      <div class="ac-tile" id="tile-cash-in">
+        <span class="ac-tile-label">Cash in · next 30 days</span>
+        <span class="ac-tile-num dash-skeleton" data-draw="v" data-source="weekly_summary" data-field="cash_in" data-row="0" data-fmt="inr">—</span>
+        <span class="ac-tile-sub">Invoices falling due, by each party's credit terms</span>
+      </div>
+      <div class="ac-tile" id="tile-cash-out">
+        <span class="ac-tile-label">Cash out · next 30 days</span>
+        <span class="ac-tile-num dash-skeleton" data-draw="v" data-source="weekly_summary" data-field="cash_out" data-row="0" data-fmt="inr">—</span>
+        <span class="ac-tile-sub">Suppliers, wages, GST and TDS</span>
+      </div>
+      <div class="ac-tile ac-tile-warn" id="tile-overdue-60">
+        <span class="ac-tile-label">Overdue past 60 days</span>
+        <span class="ac-tile-num dash-skeleton" data-draw="v" data-source="weekly_summary" data-field="over60" data-row="0" data-fmt="inr">—</span>
+        <span class="ac-tile-sub"><span class="dash-skeleton" data-draw="v" data-source="weekly_summary" data-field="over60_parties" data-row="0" data-fmt="num">—</span> parties</span>
+      </div>
+      <div class="ac-tile" id="tile-escalated">
+        <span class="ac-tile-label">Escalated</span>
+        <span class="ac-tile-num">—</span>
+        <span class="ac-tile-sub">Mail log is not connected</span>
+      </div>
+    </div>
+
+    <div class="ac-panels">
+      <div class="ac-panel" id="panel-overdue-60">
+        <h2 class="ac-panel-title">Overdue past 60 days</h2>
+        <p class="ac-panel-sub">Largest first · days since the oldest unpaid invoice</p>
+        <div class="ac-list dash-skeleton" data-draw="overdue60" data-source="overdue60"></div>
+      </div>
+      <div class="ac-panel" id="panel-forecast">
+        <h2 class="ac-panel-title">Cash forecast · next 4 weeks</h2>
+        <p class="ac-panel-sub">Money in from invoices falling due</p>
+        <div class="ac-list">
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Week of <span class="dash-skeleton" data-draw="v" data-source="forecast" data-field="starts" data-row="0" data-fmt="short">—</span></div></div><div class="ac-row-val ac-val-ok dash-skeleton" data-draw="v" data-source="forecast" data-field="due_in" data-row="0" data-fmt="inr">—</div></div>
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Week of <span class="dash-skeleton" data-draw="v" data-source="forecast" data-field="starts" data-row="1" data-fmt="short">—</span></div></div><div class="ac-row-val ac-val-ok dash-skeleton" data-draw="v" data-source="forecast" data-field="due_in" data-row="1" data-fmt="inr">—</div></div>
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Week of <span class="dash-skeleton" data-draw="v" data-source="forecast" data-field="starts" data-row="2" data-fmt="short">—</span></div></div><div class="ac-row-val ac-val-ok dash-skeleton" data-draw="v" data-source="forecast" data-field="due_in" data-row="2" data-fmt="inr">—</div></div>
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Week of <span class="dash-skeleton" data-draw="v" data-source="forecast" data-field="starts" data-row="3" data-fmt="short">—</span></div></div><div class="ac-row-val ac-val-ok dash-skeleton" data-draw="v" data-source="forecast" data-field="due_in" data-row="3" data-fmt="inr">—</div></div>
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Money out over the 30 days</div><div class="ac-row-sub">Suppliers <span class="dash-skeleton" data-draw="v" data-source="cash_out" data-field="suppliers" data-row="0" data-fmt="inr">—</span> · wages <span class="dash-skeleton" data-draw="v" data-source="cash_out" data-field="wages" data-row="0" data-fmt="inr">—</span> · GST <span class="dash-skeleton" data-draw="v" data-source="cash_out" data-field="gst" data-row="0" data-fmt="inr">—</span> · TDS <span class="dash-skeleton" data-draw="v" data-source="cash_out" data-field="tds" data-row="0" data-fmt="inr">—</span>. Not split by week: supplier due dates are missing in Tally.</div></div><div class="ac-row-val ac-val-warn dash-skeleton" data-draw="v" data-source="cash_out" data-field="cash_out" data-row="0" data-fmt="inr">—</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="ac-points" id="weekly-points">
+      <div class="ac-points-head">
+        <h2 class="ac-panel-title">Talking points for this review</h2>
+        <span class="ac-points-note">Filled from the numbers above</span>
+      </div>
+      <ol class="ac-points-list">
+        <li class="ac-if-over60"><span class="dash-skeleton" data-draw="v" data-source="overdue60" data-field="party" data-row="0" data-fmt="text">—</span> has <span class="dash-skeleton" data-draw="v" data-source="overdue60" data-field="over60" data-row="0" data-fmt="inr">—</span> more than 60 days old; its oldest unpaid invoice is <span class="dash-skeleton" data-draw="v" data-source="overdue60" data-field="oldest_days" data-row="0" data-fmt="num">—</span> days old.</li>
+        <li class="ac-if-noover60" hidden>No party has an invoice more than 60 days old.</li>
+        <li>Over the next 30 days <span class="dash-skeleton" data-draw="v" data-source="weekly_summary" data-field="cash_in" data-row="0" data-fmt="inr">—</span> falls due from customers and <span class="dash-skeleton" data-draw="v" data-source="weekly_summary" data-field="cash_out" data-row="0" data-fmt="inr">—</span> is due out. Another <span class="dash-skeleton" data-draw="v" data-source="weekly_summary" data-field="overdue" data-row="0" data-fmt="inr">—</span> is already overdue and not counted as cash in.</li>
+        <li>Escalations need the reminder mail log, which is not connected.</li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="ac-view" id="monthly" data-view="monthly" hidden>
+    <div class="ac-head">
+      <p class="ac-eyebrow">Accounting and collections · <span class="dash-skeleton" data-draw="v" data-source="months" data-field="month" data-row="0" data-fmt="month">—</span></p>
+      <h1 class="ac-headline" id="monthly-headline">Collections take <span class="dash-skeleton" data-draw="v" data-source="debtors" data-field="debtor_days" data-row="0" data-fmt="num">—</span> days against a <span data-draw="target">—</span>-day target.</h1>
+      <p class="ac-src">Live from Tally · last full month, with outstanding as of today</p>
+    </div>
+
+    <div class="ac-tiles">
+      <div class="ac-tile" id="tile-outstanding">
+        <span class="ac-tile-label">Total outstanding</span>
+        <span class="ac-tile-num dash-skeleton" data-draw="v" data-source="debtors" data-field="outstanding" data-row="0" data-fmt="inr">—</span>
+        <span class="ac-tile-sub"><span class="dash-skeleton" data-draw="v" data-source="debtors" data-field="parties" data-row="0" data-fmt="num">—</span> parties</span>
+      </div>
+      <div class="ac-tile ac-tile-warn" id="tile-debtor-days">
+        <span class="ac-tile-label">Debtor days</span>
+        <span class="ac-tile-num dash-skeleton" data-draw="v" data-source="debtors" data-field="debtor_days" data-row="0" data-fmt="num">—</span>
+        <span class="ac-tile-sub">Target under <span data-draw="target">—</span></span>
+      </div>
+      <div class="ac-tile ac-tile-warn" id="tile-material">
+        <span class="ac-tile-label">Material cost</span>
+        <span class="ac-tile-num dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="material_pct" data-row="0" data-fmt="pct">—</span>
+        <span class="ac-tile-sub">of sales · <span class="dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="material_prev_pct" data-row="0" data-fmt="pct">—</span> the month before</span>
+      </div>
+      <div class="ac-tile" id="tile-wages">
+        <span class="ac-tile-label">Wages</span>
+        <span class="ac-tile-num dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="wages_pct" data-row="0" data-fmt="pct">—</span>
+        <span class="ac-tile-sub">of sales</span>
+      </div>
+      <div class="ac-tile" id="tile-marketing">
+        <span class="ac-tile-label">Marketing</span>
+        <span class="ac-tile-num dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="marketing_pct" data-row="0" data-fmt="pct">—</span>
+        <span class="ac-tile-sub">of sales</span>
+      </div>
+    </div>
+
+    <div class="ac-panels">
+      <div class="ac-panel" id="panel-cost-heads">
+        <h2 class="ac-panel-title">Cost heads as % of sales</h2>
+        <p class="ac-panel-sub">Sales before GST: <span class="dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="sales" data-row="0" data-fmt="inr">—</span></p>
+        <div class="ac-list">
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Raw material</div><div class="ac-row-sub"><span class="dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="material" data-row="0" data-fmt="inr">—</span> · materials issued to production</div></div><div class="ac-row-val ac-val-warn dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="material_pct" data-row="0" data-fmt="pct">—</div></div>
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Wages</div><div class="ac-row-sub"><span class="dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="wages" data-row="0" data-fmt="inr">—</span> · all payroll heads, bonus included</div></div><div class="ac-row-val dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="wages_pct" data-row="0" data-fmt="pct">—</div></div>
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Power and factory</div><div class="ac-row-sub"><span class="dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="power_factory" data-row="0" data-fmt="inr">—</span> · electricity, rent, maintenance</div></div><div class="ac-row-val dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="power_factory_pct" data-row="0" data-fmt="pct">—</div></div>
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Freight</div><div class="ac-row-sub"><span class="dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="freight" data-row="0" data-fmt="inr">—</span> · freight, forwarding, loading</div></div><div class="ac-row-val dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="freight_pct" data-row="0" data-fmt="pct">—</div></div>
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Marketing</div><div class="ac-row-sub"><span class="dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="marketing" data-row="0" data-fmt="inr">—</span> · advertisement and Amazon charges</div></div><div class="ac-row-val dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="marketing_pct" data-row="0" data-fmt="pct">—</div></div>
+        </div>
+      </div>
+      <div class="ac-panel" id="panel-grades">
+        <h2 class="ac-panel-title">Outstanding by party grade</h2>
+        <p class="ac-panel-sub">Grades assumed from days late until the A/B/C/D list arrives</p>
+        <div class="ac-list">
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Grade A</div><div class="ac-row-sub"><span class="dash-skeleton" data-draw="v" data-source="grades" data-field="parties" data-where="grade=A" data-fmt="num">—</span> parties · nothing overdue</div></div><div class="ac-row-val dash-skeleton" data-draw="v" data-source="grades" data-field="outstanding" data-where="grade=A" data-fmt="inr">—</div></div>
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Grade B</div><div class="ac-row-sub"><span class="dash-skeleton" data-draw="v" data-source="grades" data-field="parties" data-where="grade=B" data-fmt="num">—</span> parties · up to 30 days late</div></div><div class="ac-row-val dash-skeleton" data-draw="v" data-source="grades" data-field="outstanding" data-where="grade=B" data-fmt="inr">—</div></div>
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Grade C</div><div class="ac-row-sub"><span class="dash-skeleton" data-draw="v" data-source="grades" data-field="parties" data-where="grade=C" data-fmt="num">—</span> parties · 31 to 90 days late</div></div><div class="ac-row-val ac-val-warn dash-skeleton" data-draw="v" data-source="grades" data-field="outstanding" data-where="grade=C" data-fmt="inr">—</div></div>
+          <div class="ac-row"><div class="ac-row-main"><div class="ac-row-title">Grade D</div><div class="ac-row-sub"><span class="dash-skeleton" data-draw="v" data-source="grades" data-field="parties" data-where="grade=D" data-fmt="num">—</span> parties · over 90 days late</div></div><div class="ac-row-val ac-val-warn dash-skeleton" data-draw="v" data-source="grades" data-field="outstanding" data-where="grade=D" data-fmt="inr">—</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="ac-points" id="monthly-points">
+      <div class="ac-points-head">
+        <h2 class="ac-panel-title">Talking points for this review</h2>
+        <span class="ac-points-note">Filled from the numbers above</span>
+      </div>
+      <ol class="ac-points-list">
+        <li>Raw material was <span class="dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="material_pct" data-row="0" data-fmt="pct">—</span> of sales, against <span class="dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="material_prev_pct" data-row="0" data-fmt="pct">—</span> the month before. This uses materials issued to production and needs a month-end stock value to confirm.</li>
+        <li>Grade C and D parties hold <span class="dash-skeleton" data-draw="v" data-source="monthly_summary" data-field="cd_outstanding" data-row="0" data-fmt="inr">—</span>.</li>
+        <li>Tally has no depreciation ledger, so the month's P&amp;L cannot be confirmed complete.</li>
+      </ol>
+    </div>
+  </section>
+
+  <p class="ac-foot" id="assumptions">Real figures, read live from Tally each time this page loads. Rules assumed until the decisions are answered: blank credit terms count as 30 days; each party's oldest invoices are treated as paid first; a proforma counts as a new order; grades come from days late; wages include bonus; marketing leaves out commission on sales.</p>
+</div>
+
+<script>
+  const TARGET_DAYS = 45;
+
+  const tallyRows = ({answer, items}) => {
+    const pieces = (items && items.length ? items : [answer]).map((x) => (typeof x === 'string' ? x : x && typeof x.text === 'string' ? x.text : JSON.stringify(x)));
+    const text = pieces.join('\n');
+    const a = text.indexOf('[');
+    const b = text.lastIndexOf(']');
+    if (a < 0 || b < a) throw new Error(text.slice(0, 300) || 'Tally returned no rows');
+    const data = JSON.parse(text.slice(a, b + 1));
+    const sync = text.slice(0, a).split('\n')[0].trim();
+    return {data, columns: Object.keys(data[0] || {}), truncated: data.length >= 1000, meta: sync ? [{label: 'Tally', value: sync}] : []};
+  };
+  ['ageing', 'receipts', 'receipt_checks', 'week', 'cash_out', 'months', 'debtors'].forEach((id) => {
+    dash.loader(id, {description: 'Reads the rows out of the Tally connector\'s text answer.', fn: tallyRows});
+  });
+
+  dash.calc('daily_summary', {
+    title: 'Today at a glance',
+    description: 'Today\'s receipts, invoices due today, today\'s receipts that left an invoice partly unpaid, and parties with overdue money and a new proforma.',
+    inputs: ['receipts', 'ageing', 'receipt_checks'],
+    fn: (receipts, ageing, receipt_checks) => {
+      const sum = (rows, key) => rows.reduce((s, r) => s + Number(r[key] || 0), 0);
+      const today = receipts.filter((r) => Number(r.is_today) === 1);
+      const due = ageing.filter((r) => Number(r.due_today) > 0);
+      const checks = receipt_checks.filter((r) => Number(r.is_today) === 1);
+      const flags = ageing.filter((r) => Number(r.proformas) > 0 && Number(r.overdue) > 0);
+      return [{collected: sum(today, 'amount'), receipts: sum(today, 'receipts'), parties: today.length, due_today: sum(due, 'due_today'), due_parties: due.length, checks: checks.length, checks_open: sum(checks, 'still_open'), flag_parties: flags.length, flag_proformas: sum(flags, 'proformas')}];
+    },
+  });
+
+  dash.calc('red_flags', {
+    title: 'Red-flag orders',
+    description: 'Parties that have a proforma invoice in Tally and money past its due date, largest overdue first.',
+    inputs: ['ageing'],
+    fn: (ageing) => ageing.filter((r) => Number(r.proformas) > 0 && Number(r.overdue) > 0).sort((x, y) => Number(y.overdue) - Number(x.overdue)).map((r) => ({party: r.party, proformas: Number(r.proformas), proforma_value: Number(r.proforma_value), overdue: Number(r.overdue), days_late: Number(r.days_late)})),
+  });
+
+  dash.calc('overdue60', {
+    title: 'Overdue past 60 days',
+    description: 'Parties with unpaid invoices more than 60 days old, largest first.',
+    inputs: ['ageing'],
+    fn: (ageing) => ageing.filter((r) => Number(r.over60) > 0).sort((x, y) => Number(y.over60) - Number(x.over60)).map((r) => ({party: r.party, over60: Number(r.over60), oldest_days: Number(r.oldest_days), owes: Number(r.owes), grade: r.grade})),
+  });
+
+  dash.calc('forecast', {
+    title: 'Cash in by week',
+    description: 'Unpaid invoices falling due in each of the next four weeks, starting tomorrow.',
+    inputs: ['ageing'],
+    fn: (ageing) => {
+      if (!ageing.length) return [];
+      const start = new Date(ageing[0].today + 'T00:00:00Z');
+      return ['w1', 'w2', 'w3', 'w4'].map((key, i) => ({week: i + 1, starts: new Date(start.getTime() + (1 + 7 * i) * 86400000).toISOString().slice(0, 10), due_in: ageing.reduce((s, r) => s + Number(r[key] || 0), 0)}));
+    },
+  });
+
+  dash.calc('grades', {
+    title: 'Outstanding by grade',
+    description: 'Parties and money owed in each assumed grade: A nothing overdue, B up to 30 days late, C 31 to 90, D over 90.',
+    inputs: ['ageing'],
+    fn: (ageing) => ['A', 'B', 'C', 'D'].map((grade) => {
+      const rows = ageing.filter((r) => r.grade === grade);
+      return {grade, parties: rows.length, outstanding: rows.reduce((s, r) => s + Number(r.owes || 0), 0)};
+    }),
+  });
+
+  dash.calc('weekly_summary', {
+    title: 'The week at a glance',
+    description: 'Last week\'s collections, invoices falling due in the next 30 days, money due out, and invoices more than 60 days old.',
+    inputs: ['week', 'ageing', 'cash_out'],
+    fn: (week, ageing, cash_out) => {
+      const sum = (key) => ageing.reduce((s, r) => s + Number(r[key] || 0), 0);
+      const w = week[0] || {};
+      const out = cash_out[0] || {};
+      return [{collected: Number(w.collected || 0), receipts: Number(w.receipts || 0), parties: Number(w.parties || 0), cash_in: sum('due_next30'), cash_out: Number(out.cash_out || 0), over60: sum('over60'), over60_parties: ageing.filter((r) => Number(r.over60) > 0).length, overdue: sum('overdue')}];
+    },
+  });
+
+  dash.calc('monthly_summary', {
+    title: 'The month at a glance',
+    description: 'Last full month\'s cost heads as a share of sales before GST, the material share the month before, and money owed by grade C and D parties.',
+    inputs: ['months', 'ageing'],
+    fn: (months, ageing) => {
+      const m = months[0] || {};
+      const prev = months[1] || {};
+      const share = (part, whole) => {
+        const p = Number(whole) > 0 ? (100 * Number(part || 0)) / Number(whole) : 0;
+        return p < 1 ? Math.round(p * 100) / 100 : Math.round(p * 10) / 10;
+      };
+      return [{
+        month: m.month, sales: Number(m.sales || 0),
+        material: Number(m.material || 0), material_pct: share(m.material, m.sales), material_prev_pct: share(prev.material, prev.sales),
+        wages: Number(m.wages || 0), wages_pct: share(m.wages, m.sales),
+        power_factory: Number(m.power_factory || 0), power_factory_pct: share(m.power_factory, m.sales),
+        freight: Number(m.freight || 0), freight_pct: share(m.freight, m.sales),
+        marketing: Number(m.marketing || 0), marketing_pct: share(m.marketing, m.sales),
+        cd_outstanding: ageing.filter((r) => r.grade === 'C' || r.grade === 'D').reduce((s, r) => s + Number(r.owes || 0), 0),
+      }];
+    },
+  });
+
+  const utc = (s) => new Date(String(s).slice(0, 10) + 'T00:00:00Z');
+  const formats = {
+    inr: (v) => (Number(v) < 0 ? '-' : '') + '₹' + Math.abs(Math.round(Number(v) || 0)).toLocaleString('en-IN'),
+    num: (v) => (Number(v) || 0).toLocaleString('en-IN'),
+    pct: (v) => (Number(v) || 0).toLocaleString('en-IN') + '%',
+    text: (v) => String(v),
+    day: (v) => d3.utcFormat('%A %-d %b')(utc(v)),
+    short: (v) => d3.utcFormat('%-d %b')(utc(v)),
+    month: (v) => d3.utcFormat('%B %Y')(utc(String(v) + '-01')),
+  };
+
+  const pickRow = (rows, el) => {
+    if (!Array.isArray(rows)) return null;
+    if (el.dataset.where) {
+      const conds = el.dataset.where.split('&').map((c) => c.split('=').map(decodeURIComponent));
+      return rows.find((r) => conds.every(([k, val]) => String(r[k]) === val)) || null;
+    }
+    return rows[Number(el.dataset.row || 0)] || null;
+  };
+
+  dash.draw('v', (el) => {
+    const d = dash.data(el.dataset.source);
+    if (d.status === 'loading') return;
+    el.classList.remove('dash-skeleton');
+    const row = d.status === 'ok' ? pickRow(d.data, el) : null;
+    const value = row ? row[el.dataset.field] : null;
+    const fmt = formats[el.dataset.fmt] || formats.text;
+    el.textContent = value === null || value === undefined ? '—' : fmt(value);
+  });
+
+  dash.draw('target', (el) => { el.textContent = String(TARGET_DAYS); });
+
+  const node = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  };
+  const listRow = (title, sub, value, valueClass, mark, pill) => {
+    const row = node('div', 'ac-row');
+    const main = node('div', 'ac-row-main');
+    const head = node('div', 'ac-row-title', title);
+    if (pill) head.append(node('span', 'ac-pill', pill));
+    main.append(head, node('div', 'ac-row-sub', sub));
+    const val = node('div', 'ac-row-val' + (valueClass ? ' ' + valueClass : ''), value);
+    if (mark) {
+      val.setAttribute('data-source', mark.source);
+      val.setAttribute('data-field', mark.field);
+      val.setAttribute('data-where', mark.where.map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&'));
+    }
+    row.append(main, val);
+    return row;
+  };
+  const drawList = (name, source, build, emptyText) => dash.draw(name, (el) => {
+    const d = dash.data(source);
+    if (d.status === 'loading') return;
+    el.classList.remove('dash-skeleton');
+    if (d.status !== 'ok') {
+      el.replaceChildren(node('div', 'ac-empty', d.status === 'error' ? 'This list did not load from Tally.' : '—'));
+      return;
+    }
+    const rows = Array.isArray(d.data) ? d.data : [];
+    el.replaceChildren(...(rows.length ? rows.map(build) : [node('div', 'ac-empty', emptyText)]));
+  });
+
+  drawList('red-flags', 'red_flags', (r) => listRow(
+    r.party,
+    (r.proforma_value > 0 ? 'New proformas ' + formats.inr(r.proforma_value) : 'New proforma, value not recorded') + ' · up to ' + formats.num(r.days_late) + ' days late',
+    formats.inr(r.overdue) + ' overdue', 'ac-val-warn',
+    {source: 'red_flags', field: 'overdue', where: [['party', r.party]]}
+  ), 'No party with overdue money has a new proforma.');
+
+  drawList('receipt-checks', 'receipt_checks', (r) => listRow(
+    r.party,
+    'Received ' + formats.inr(r.received) + ' against ' + formats.inr(r.invoice_value) + ' · ' + r.invoice + ' · ' + formats.short(r.date),
+    formats.inr(r.still_open) + ' open', 'ac-val-warn',
+    {source: 'receipt_checks', field: 'still_open', where: [['party', r.party], ['invoice', r.invoice]]},
+    Number(r.is_today) === 1 ? 'Today' : ''
+  ), 'Every receipt in the last 7 days cleared its invoice in full.');
+
+  drawList('overdue60', 'overdue60', (r) => listRow(
+    r.party,
+    formats.inr(r.over60) + ' over 60 days · owes ' + formats.inr(r.owes) + ' in all · grade ' + r.grade,
+    formats.num(r.oldest_days) + ' days', 'ac-val-warn',
+    {source: 'overdue60', field: 'oldest_days', where: [['party', r.party]]}
+  ), 'No party has an invoice more than 60 days old.');
+
+  dash.onData(() => {
+    const either = (source, yes, no) => {
+      const d = dash.data(source);
+      const known = d.status === 'ok' && Array.isArray(d.data);
+      const empty = known && d.data.length === 0;
+      document.querySelectorAll(yes).forEach((e) => { e.hidden = empty; });
+      document.querySelectorAll(no).forEach((e) => { e.hidden = !empty; });
+    };
+    either('red_flags', '.ac-if-flags', '.ac-if-noflags');
+    either('receipt_checks', '.ac-if-checks', '.ac-if-nochecks');
+    either('overdue60', '.ac-if-over60', '.ac-if-noover60');
+  });
+
+  const viewIds = ['daily', 'weekly', 'monthly'];
+  let currentView = 'daily';
+  const showView = (id, link) => {
+    currentView = viewIds.includes(id) ? id : 'daily';
+    document.querySelectorAll('.ac-view').forEach((s) => { s.hidden = s.dataset.view !== currentView; });
+    document.querySelectorAll('.ac-tab').forEach((b) => {
+      const on = b.dataset.view === currentView;
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+      b.classList.toggle('ac-tab-on', on);
+    });
+    if (link) dash.setLink(currentView);
+  };
+  document.querySelectorAll('.ac-tab').forEach((b) => b.addEventListener('click', () => showView(b.dataset.view, true)));
+  showView((location.hash || '').replace('#', ''), false);
+  window.addEventListener('beforeprint', () => document.querySelectorAll('.ac-view').forEach((s) => { s.hidden = false; }));
+  window.addEventListener('afterprint', () => showView(currentView, false));
+</script>
+
+</div>
+<script>window.__liveBoot();</script>
+</div>
+</body>
+</html>

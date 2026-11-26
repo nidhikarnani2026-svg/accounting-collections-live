@@ -203,7 +203,7 @@
         el('login-error').hidden = true;
         try {
           const name = el('login-email').value.trim().toLowerCase();
-          saveSession(await auth('password', {email: name.includes('@') ? name : name + '@people.tallydata.invalid', password: el('login-password').value}));
+          saveSession(await auth('password', {email: name.includes('@') ? name : name + '@people.tallydata.invalid', password: el('login-password').value.trim()}));
           el('login-password').value = '';
           start();
         } catch (e) {
